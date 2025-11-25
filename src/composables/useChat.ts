@@ -1,5 +1,6 @@
+// src/composables/useChat.ts
 import { ref, computed } from "vue";
-import { invokeAgentRuntime } from "../agentcore/client";
+import { streamAgentRuntime } from "../agentcore/client";
 
 export type ChatMessage = {
   role: "user" | "assistant";
@@ -16,25 +17,41 @@ export function useChat() {
     const text = input.trim();
     if (!text) return;
 
+    // User message
     messages.value.push({ role: "user", content: text });
+
+    // Placeholder assistant message to stream into
+    const assistantIndex = messages.value.push({
+      role: "assistant",
+      content: "",
+    }) - 1;
+
     isGenerating.value = true;
     lastError.value = null;
 
     try {
-      const result = await invokeAgentRuntime(text, runtimeSessionId ?? undefined);
-      runtimeSessionId = result.runtimeSessionId;
+      const { fullText, runtimeSessionId: newSessionId } =
+        await streamAgentRuntime(text, {
+          runtimeSessionId: runtimeSessionId ?? undefined,
+          onTextChunk(chunk) {
+            // append each line as it "streams"
+            messages.value[assistantIndex].content += chunk;
+          },
+          onEvent(evt) {
+            // Hook for later: inspect evt.line to isolate tool calls etc.
+            // console.debug("Line event:", evt);
+          },
+        });
 
-      messages.value.push({
-        role: "assistant",
-        content: result.text,
-      });
+      runtimeSessionId = newSessionId;
+
+      // Ensure message content equals accumulated text
+      messages.value[assistantIndex].content = fullText;
     } catch (e: any) {
       console.error(e);
       lastError.value = e?.message ?? String(e);
-      messages.value.push({
-        role: "assistant",
-        content: `Error while calling AgentCore: ${lastError.value}`,
-      });
+      messages.value[assistantIndex].content =
+        `Error while calling AgentCore: ${lastError.value}`;
     } finally {
       isGenerating.value = false;
     }
@@ -44,7 +61,7 @@ export function useChat() {
   const lastTemplate = computed<string | null>(() => {
     for (let i = messages.value.length - 1; i >= 0; i--) {
       const msg = messages.value[i];
-      if (!msg || msg.role !== "assistant") continue;
+      if (msg.role !== "assistant") continue;
       const text = msg.content;
 
       const match =
