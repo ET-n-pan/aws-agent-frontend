@@ -17,15 +17,14 @@ const md: MarkdownIt = new MarkdownIt({
   highlight(code, lang) {
     if (lang && hljs.getLanguage(lang)) {
       try {
-        return `<pre><code class="hljs language-${lang}">${hljs.highlight(
-          code,
-          { language: lang }
-        ).value}</code></pre>`;
-      } catch (_) {
-        // fallthrough
+        const out = hljs.highlight(code, { language: lang }).value;
+        return `<pre><code class="hljs language-${lang}">${out}</code></pre>`;
+      } catch {
+        // ignore
       }
     }
-    return `<pre><code class="hljs">${MarkdownIt.prototype.utils.escapeHtml(code)}</code></pre>`;
+    const escaped = md.utils.escapeHtml(code);
+    return `<pre><code class="hljs">${escaped}</code></pre>`;
   },
 });
 
