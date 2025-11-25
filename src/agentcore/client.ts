@@ -20,15 +20,9 @@ async function getAwsCredentials() {
   const session = await fetchAuthSession();
   const idToken = session.tokens?.idToken?.toString();
 
-  if (!idToken) {
-    throw new Error("No ID token – user is not authenticated.");
-  }
-  if (!IDENTITY_POOL_ID) {
-    throw new Error("Identity Pool ID not found in amplify_outputs.json.");
-  }
-  if (!USER_POOL_ID) {
-    throw new Error("User Pool ID not found in amplify_outputs.json.");
-  }
+  if (!idToken) throw new Error("No ID token – user is not authenticated.");
+  if (!IDENTITY_POOL_ID) throw new Error("Identity Pool ID missing.");
+  if (!USER_POOL_ID) throw new Error("User Pool ID missing.");
 
   const credentials = fromCognitoIdentityPool({
     identityPoolId: IDENTITY_POOL_ID,
@@ -49,9 +43,7 @@ async function getAgentCoreClient() {
   });
 }
 
-// ─────────────────────────────────────────
-// Non-streaming helper (what we had before)
-// ─────────────────────────────────────────
+// Non-streaming (keep if you still want it)
 export async function invokeAgentRuntime(
   prompt: string,
   runtimeSessionId?: string
@@ -75,13 +67,12 @@ export async function invokeAgentRuntime(
 }
 
 // ─────────────────────────────────────────
-// Streaming helper — JS equivalent of Python example
+// Streaming: plain text chunks (no SSE)
 // ─────────────────────────────────────────
 
 export type AgentStreamEvent =
   | { type: "data"; text: string }
-  | { type: "done" }
-  | { type: "raw-json"; json: any };
+  | { type: "done" };
 
 export async function* streamAgentRuntime(
   prompt: string,
@@ -101,63 +92,27 @@ export async function* streamAgentRuntime(
 
   const response = await client.send(command);
 
-  const contentType = response.contentType ?? "";
+  // We don't trust contentType anymore – we'll just stream whatever it gives
+  const stream = response.response as ReadableStream<Uint8Array>;
+  const reader = stream.getReader();
+  const decoder = new TextDecoder("utf-8");
 
-  // Case 1: streaming "text/event-stream" like in the Python example
-  if (contentType.includes("text/event-stream")) {
-    const stream = response.response as ReadableStream<Uint8Array>;
-    const reader = stream.getReader();
-    const decoder = new TextDecoder("utf-8");
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
 
-    let buffer = "";
-
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-
-      // Split into lines; keep last partial line in buffer
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
-
-      for (const line of lines) {
-        const trimmed = line.trim();
-        // SSE-style: "data: { ... }"
-        if (trimmed.startsWith("data:")) {
-          const dataStr = trimmed.slice(5).trimStart(); // remove "data:" + space
-          // You can keep it as raw text, or try JSON.parse here:
-          yield { type: "data", text: dataStr };
-        }
-      }
+    const chunk = decoder.decode(value, { stream: true });
+    if (chunk) {
+      // This may be partial sentences, JSON, whatever AgentCore sends
+      yield { type: "data", text: chunk };
     }
-
-    // Flush any remaining buffered text (if it's a valid data line)
-    const finalLine = buffer.trim();
-    if (finalLine.startsWith("data:")) {
-      const dataStr = finalLine.slice(5).trimStart();
-      yield { type: "data", text: dataStr };
-    }
-
-    yield { type: "done" };
-    return;
   }
 
-  // Case 2: standard JSON response (application/json) like in Python example
-  if (contentType === "application/json") {
-    const text = await response.response.transformToString();
-    try {
-      const json = JSON.parse(text);
-      yield { type: "raw-json", json };
-    } catch {
-      yield { type: "data", text };
-    }
-    yield { type: "done" };
-    return;
+  // flush any remaining
+  const final = decoder.decode();
+  if (final) {
+    yield { type: "data", text: final };
   }
 
-  // Fallback: just treat whole body as raw text
-  const text = await response.response.transformToString();
-  yield { type: "data", text };
   yield { type: "done" };
 }
